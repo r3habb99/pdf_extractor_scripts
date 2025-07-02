@@ -1,0 +1,38 @@
+# Core PDF Processing Libraries (REQUIRED)
+pdfplumber>=0.7.0
+PyPDF2>=3.0.0
+pdf2image>=1.16.0
+
+# OCR and Image Processing (REQUIRED)
+pytesseract>=0.3.10
+opencv-python>=4.5.0
+Pillow>=9.0.0
+easyocr>=1.6.0
+numpy>=1.21.0
+
+# Machine Learning and Text Processing (REQUIRED)
+scikit-learn>=1.0.0
+
+# Configuration and Data Handling (REQUIRED)
+PyYAML>=6.0
+
+# Optional: Enhanced PDF Processing (USED in schlage_processor.py)
+PyMuPDF>=1.20.0
+
+# Optional: Advanced OCR (USED in image_pdf_processor.py - Heavy dependencies)
+paddleocr>=2.6.0
+paddlepaddle>=2.4.0
+
+# NOT CURRENTLY USED - Future Enhancement Libraries
+# transformers>=4.20.0
+# torch>=1.12.0
+# dataclasses-json>=0.5.7
+# invoice2data>=0.3.6
+# donut-python>=1.0.0
+# timm>=0.6.0
+# sentencepiece>=0.1.96
+# datasets>=2.0.0
+
+# Development and Testing
+pytest>=7.0.0
+pytest-cov>=4.0.0
