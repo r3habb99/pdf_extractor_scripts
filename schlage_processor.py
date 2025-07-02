@@ -1108,49 +1108,144 @@ class SchlageInvoiceProcessor:
         vendor['phone'] = phones_found[0] if phones_found else None
 
     def _parse_customer_enhanced(self, text: str, customer: Dict[str, Any]) -> None:
-        """Enhanced customer parsing to match original flat structure."""
+        """Enhanced customer parsing to extract both BILL TO and SHIP TO information."""
+        logger.info("Parsing customer information with BILL TO and SHIP TO sections...")
+
+        # Initialize both bill_to and ship_to sections
+        customer['bill_to'] = {}
+        customer['ship_to'] = {}
+
+        # Split text into lines for processing
         lines = text.split('\n')
 
-        # Find BILL TO section
-        bill_to_started = False
-        for line in lines:
+        # Find BILL TO and SHIP TO sections using more robust parsing
+        bill_to_section = self._extract_address_section(text, 'BILL TO')
+        ship_to_section = self._extract_address_section(text, 'SHIP TO')
+
+        # Populate bill_to section
+        if bill_to_section:
+            customer['bill_to'] = bill_to_section
+            logger.info(f"Extracted BILL TO: {bill_to_section}")
+
+        # Populate ship_to section
+        if ship_to_section:
+            customer['ship_to'] = ship_to_section
+            logger.info(f"Extracted SHIP TO: {ship_to_section}")
+
+        # For backward compatibility, also populate the top-level customer_info fields with BILL TO data
+        if customer['bill_to']:
+            customer['company_name'] = customer['bill_to'].get('company_name', '')
+            customer['address'] = customer['bill_to'].get('address', '')
+            customer['city_state_zip'] = customer['bill_to'].get('city_state_zip', '')
+
+    def _extract_address_section(self, text: str, section_name: str) -> Dict[str, Any]:
+        """Extract address section (BILL TO or SHIP TO) from text."""
+        logger.debug(f"Extracting {section_name} section...")
+
+        section_data = {}
+        lines = text.split('\n')
+
+        # Find the start of the section and collect relevant lines
+        section_started = False
+        section_lines = []
+
+        for i, line in enumerate(lines):
             line = line.strip()
-            if not line:
+
+            # Look for the section header (e.g., "BILL TO:" or "SHIP TO:")
+            if f"{section_name}:" in line.upper():
+                section_started = True
                 continue
 
-            # Start of BILL TO section
-            if 'BILL TO' in line.upper():
-                bill_to_started = True
-                continue
+            # Stop collecting when we hit another major section
+            if section_started:
+                # Stop at next major section headers
+                if any(keyword in line.upper() for keyword in ['BRAND CARRIER', 'QUOTE NUMBER', 'PAYMENT TERMS']):
+                    break
+                # Also stop at the other address section
+                other_section = 'SHIP TO:' if section_name == 'BILL TO' else 'BILL TO:'
+                if other_section in line.upper():
+                    break
 
-            # End of BILL TO section (when we hit SHIP TO or other sections)
-            if bill_to_started and any(keyword in line.upper() for keyword in ['SHIP TO', 'SELLER', 'INVOICE']):
-                break
+                # Collect this line if it's meaningful
+                if line and len(line) > 2:
+                    section_lines.append(line)
 
-            # Extract customer info from BILL TO section
-            if bill_to_started:
-                # Customer number
-                if 'CUSTOMER#' in line.upper():
-                    continue  # Skip customer number line
+        logger.debug(f"{section_name} section lines: {section_lines}")
 
-                # Company name (first non-customer# line in BILL TO)
-                if not customer.get('company_name') and len(line) > 5:
-                    # Clean up the company name - remove extra info
-                    company_name = line
-                    if 'CUSTOMER PO#' in company_name:
-                        company_name = company_name.split('CUSTOMER PO#')[0].strip()
-                    customer['company_name'] = company_name
+        # Parse the collected lines based on the specific format
+        if section_name == 'BILL TO':
+            # For BILL TO: expect company, address, city/state/zip
+            for line in section_lines:
+                # Handle lines with order info - extract what we need first
+                if 'CUSTOMER PO#' in line.upper():
+                    # Extract company name before CUSTOMER PO#
+                    company_part = line.split('CUSTOMER PO#')[0].strip()
+                    if company_part and not section_data.get('company_name'):
+                        section_data['company_name'] = company_part
+                    continue
+
+                if 'ORDER DATE' in line.upper():
+                    # Extract city/state/zip before ORDER DATE
+                    city_part = line.split('ORDER DATE')[0].strip()
+                    city_match = re.search(r'([A-Z\s]+,?\s*[A-Z]{2}\s*\d{5})', city_part, re.IGNORECASE)
+                    if city_match and not section_data.get('city_state_zip'):
+                        section_data['city_state_zip'] = city_match.group(1).strip()
+                    continue
+
+                # Company name (first line that's not an address or city/state/zip)
+                if (not section_data.get('company_name') and
+                    not re.search(r'\d+\s+[A-Z\s]+(ST|STREET|DRIVE|DR|AVENUE|AVE|BLVD)', line, re.IGNORECASE) and
+                    not re.search(r'[A-Z\s]+,?\s*[A-Z]{2}\s*\d{5}', line, re.IGNORECASE)):
+                    section_data['company_name'] = line
 
                 # Address (line with numbers and street)
                 elif re.search(r'\d+\s+[A-Z\s]+(ST|STREET|DRIVE|DR|AVENUE|AVE|BLVD)', line, re.IGNORECASE):
-                    customer['address'] = line
+                    section_data['address'] = line
 
-                # City, State ZIP (clean up extra text)
+                # City, State ZIP (extract just the city/state/zip part)
                 elif re.search(r'[A-Z\s]+,?\s*[A-Z]{2}\s*\d{5}', line, re.IGNORECASE):
-                    # Extract just the city, state, zip part
                     city_match = re.search(r'([A-Z\s]+,?\s*[A-Z]{2}\s*\d{5})', line, re.IGNORECASE)
                     if city_match:
-                        customer['city_state_zip'] = city_match.group(1).strip()
+                        section_data['city_state_zip'] = city_match.group(1).strip()
+
+        elif section_name == 'SHIP TO':
+            # For SHIP TO: expect company, customer number, address, city/state/zip
+            for line in section_lines:
+                # Skip lines with other info
+                if any(keyword in line.upper() for keyword in ['NET DUE DATE', 'SALES REP']):
+                    # Extract company name before SALES REP
+                    if 'SALES REP' in line.upper():
+                        company_part = line.split('SALES REP')[0].strip()
+                        if company_part and not section_data.get('company_name'):
+                            section_data['company_name'] = company_part
+                    continue
+
+                # Skip standalone customer numbers
+                if re.match(r'^\d{7,8}$', line):
+                    continue
+
+                # Company name (first line that's not an address or city/state/zip)
+                if (not section_data.get('company_name') and
+                    not re.search(r'\d+\s+[A-Z\s]+(ST|STREET|DRIVE|DR|AVENUE|AVE|BLVD)', line, re.IGNORECASE) and
+                    not re.search(r'[A-Z\s]+,?\s*[A-Z]{2}\s*\d{5}', line, re.IGNORECASE)):
+                    section_data['company_name'] = line
+
+                # Address (line with numbers and street, remove JOB NAME if present)
+                elif re.search(r'\d+\s+[A-Z\s]+(ST|STREET|DRIVE|DR|AVENUE|AVE|BLVD)', line, re.IGNORECASE):
+                    address = line
+                    if 'JOB NAME' in address.upper():
+                        address = address.split('JOB NAME')[0].strip()
+                    section_data['address'] = address
+
+                # City, State ZIP
+                elif re.search(r'[A-Z\s]+,?\s*[A-Z]{2}\s*\d{5}', line, re.IGNORECASE):
+                    city_match = re.search(r'([A-Z\s]+,?\s*[A-Z]{2}\s*\d{5})', line, re.IGNORECASE)
+                    if city_match:
+                        section_data['city_state_zip'] = city_match.group(1).strip()
+
+        logger.debug(f"Parsed {section_name} data: {section_data}")
+        return section_data
 
     def _parse_address_section(self, lines: List[str], section_type: str) -> Dict[str, Any]:
         """Parse address section dynamically."""

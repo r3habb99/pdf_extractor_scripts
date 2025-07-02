@@ -862,17 +862,11 @@ class FallbackProcessor:
                 # Skip nested 'remit_to' structure
             }
 
-        # Convert customer info - flatten nested structures
+        # Convert customer info - preserve bill_to and ship_to structures
         if 'customer_info' in schlage_data:
             customer = schlage_data['customer_info']
-            # Use bill_to as primary customer info
-            bill_to = customer.get('bill_to', {})
-            standard_data['customer_info'] = {
-                'company_name': bill_to.get('company_name'),
-                'address': bill_to.get('address'),
-                'city_state_zip': bill_to.get('city_state_zip')
-                # Skip complex nested structures
-            }
+            # Preserve the full customer_info structure including bill_to and ship_to
+            standard_data['customer_info'] = customer.copy()
 
         # Copy other sections as-is if they're compatible
         for section in ['line_items', 'totals', 'payment_terms', 'shipping_info', 'metadata']:
