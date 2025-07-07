@@ -206,13 +206,13 @@ class CECOInvoiceProcessor:
     
     def _extract_text_with_pdfplumber(self, pdf_path: str) -> str:
         """
-        Extract text from multi-page PDF using pdfplumber with layout preservation.
+        Extract exact raw text from multi-page PDF preserving all spacing and layout.
 
         Args:
             pdf_path: Path to the PDF file
 
         Returns:
-            Extracted text content from all pages
+            Extracted raw text content from all pages with exact formatting
         """
         try:
             with pdfplumber.open(pdf_path) as pdf:
@@ -221,10 +221,11 @@ class CECOInvoiceProcessor:
                 logger.info(f"Processing {total_pages} pages from {pdf_path}")
 
                 for page_num, page in enumerate(pdf.pages, 1):
-                    page_text = page.extract_text()
+                    # Extract exact raw text preserving spacing and layout
+                    page_text = self._extract_raw_text_exact(page)
                     if page_text:
                         # Add page separator for multi-page processing
-                        text_content += f"\n=== PAGE {page_num} ===\n"
+                        text_content += f"=== PAGE {page_num} ===\n"
                         text_content += page_text + "\n"
                         logger.debug(f"Extracted {len(page_text)} characters from page {page_num}")
 
@@ -234,7 +235,118 @@ class CECOInvoiceProcessor:
         except Exception as e:
             logger.error(f"Failed to extract text from {pdf_path}: {e}")
             return ""
-    
+
+    def _extract_raw_text_exact(self, page) -> str:
+        """
+        Extract exact raw text from page preserving all spacing and layout.
+
+        Args:
+            page: pdfplumber page object
+
+        Returns:
+            Raw text with exact spacing and formatting preserved
+        """
+        try:
+            # Method 1: Try to get text with layout preservation
+            try:
+                raw_text = page.extract_text(layout=True, x_tolerance=1, y_tolerance=1)
+                if raw_text and len(raw_text.strip()) > 0:
+                    return raw_text
+            except Exception as e:
+                logger.debug(f"Layout-based extraction failed: {e}")
+
+            # Method 2: Character-by-character reconstruction preserving exact positions
+            chars = page.chars
+            if chars:
+                return self._reconstruct_text_with_exact_spacing(chars)
+
+            # Method 3: Fallback to basic extraction
+            return page.extract_text() or ""
+
+        except Exception as e:
+            logger.warning(f"Raw text extraction failed: {e}")
+            return ""
+
+    def _reconstruct_text_with_exact_spacing(self, chars: list) -> str:
+        """
+        Reconstruct text from characters preserving exact spacing and layout.
+
+        Args:
+            chars: List of character dictionaries from pdfplumber
+
+        Returns:
+            Text with exact spacing preserved
+        """
+        if not chars:
+            return ""
+
+        # Sort characters by y-coordinate (top to bottom) then x-coordinate (left to right)
+        sorted_chars = sorted(chars, key=lambda c: (-c.get('y0', 0), c.get('x0', 0)))
+
+        lines = []
+        current_line = []
+        current_y = None
+        y_tolerance = 2  # Tolerance for considering characters on the same line
+
+        for char in sorted_chars:
+            char_y = char.get('y0', 0)
+            char_text = char.get('text', '')
+            char_x = char.get('x0', 0)
+
+            # Check if this character is on a new line
+            if current_y is None or abs(char_y - current_y) > y_tolerance:
+                # Save previous line if it exists
+                if current_line:
+                    lines.append(self._build_line_with_spacing(current_line))
+
+                # Start new line
+                current_line = [(char_x, char_text)]
+                current_y = char_y
+            else:
+                # Add to current line
+                current_line.append((char_x, char_text))
+
+        # Add the last line
+        if current_line:
+            lines.append(self._build_line_with_spacing(current_line))
+
+        return '\n'.join(lines)
+
+    def _build_line_with_spacing(self, char_positions: list) -> str:
+        """
+        Build a line of text with proper spacing based on character positions.
+
+        Args:
+            char_positions: List of (x_position, character) tuples
+
+        Returns:
+            Line of text with proper spacing
+        """
+        if not char_positions:
+            return ""
+
+        # Sort by x position
+        char_positions.sort(key=lambda x: x[0])
+
+        line_text = ""
+        prev_x = None
+
+        for x_pos, char_text in char_positions:
+            if prev_x is not None:
+                # Calculate spacing based on position difference
+                # Approximate character width (adjust as needed)
+                char_width = 6  # Average character width in points
+                space_count = max(0, int((x_pos - prev_x) / char_width) - 1)
+
+                # Add spaces if there's a gap
+                if space_count > 0:
+                    line_text += ' ' * space_count
+
+            line_text += char_text
+            prev_x = x_pos + len(char_text) * 6  # Estimate end position
+
+        return line_text
+
     def _extract_field_with_patterns(self, text: str, patterns: List[str], field_name: str) -> Optional[str]:
         """
         Extract a field using multiple patterns with fallback.

@@ -578,7 +578,8 @@ class TextPDFProcessor:
         layout_data = self._extract_with_layout(pdf_path_obj)
 
         # Save raw text to vendor-specific folder if vendor_folder is provided
-        raw_text = layout_data.get('all_text', '')
+        # Use exact raw text if available, otherwise fall back to processed text
+        raw_text = layout_data.get('all_raw_text', '') or layout_data.get('all_text', '')
         if vendor_folder and raw_text:
             save_raw_text_to_vendor_folder(raw_text, pdf_path_obj, vendor_folder)
 
@@ -642,55 +643,64 @@ class TextPDFProcessor:
     def _extract_with_layout(self, pdf_path: Path) -> Dict[str, Any]:
         """
         Extract text while preserving layout information.
-        
+
         Args:
             pdf_path: Path to the PDF file
-            
+
         Returns:
             Dictionary containing text with layout information
         """
         layout_data = {
             'pages': [],
             'all_text': "",
+            'all_raw_text': "",  # Add field for exact raw text
             'text_elements': []
         }
-        
+
         try:
             with pdfplumber.open(pdf_path) as pdf:
                 for page_num, page in enumerate(pdf.pages):
                     page_data = self._extract_page_layout(page, page_num + 1)
                     layout_data['pages'].append(page_data)
                     layout_data['all_text'] += page_data['text'] + "\n"
+                    # Use raw text for exact extraction
+                    if page_data.get('raw_text'):
+                        layout_data['all_raw_text'] += f"=== PAGE {page_num + 1} ===\n"
+                        layout_data['all_raw_text'] += page_data['raw_text'] + "\n"
                     layout_data['text_elements'].extend(page_data['elements'])
-                    
+
         except Exception as e:
             logger.error(f"Error extracting layout with pdfplumber: {e}")
             # Fallback to PyPDF2 for basic text extraction
             layout_data = self._fallback_pypdf2_extraction(pdf_path)
-        
+
         return layout_data
     
     def _extract_page_layout(self, page, page_number: int) -> Dict[str, Any]:
         """
         Extract layout information from a single page.
-        
+
         Args:
             page: pdfplumber page object
             page_number: Page number (1-based)
-            
+
         Returns:
             Dictionary containing page layout data
         """
         page_data = {
             'page_number': page_number,
             'text': "",
+            'raw_text': "",  # Add raw text field for exact extraction
             'elements': [],
             'tables': [],
             'lines': []
         }
-        
+
         try:
-            # Extract text with character-level details
+            # Extract exact raw text preserving all spacing and layout
+            page_data['raw_text'] = self._extract_raw_text_exact(page)
+
+            # Extract text with character-level details for processing
             chars = page.chars
             if chars:
                 # Group characters into text elements
@@ -700,12 +710,12 @@ class TextPDFProcessor:
             else:
                 # Fallback to simple text extraction
                 page_data['text'] = page.extract_text() or ""
-            
+
             # Extract tables if present
             tables = page.extract_tables()
             if tables:
                 page_data['tables'] = self._process_tables(tables)
-            
+
             # Extract lines/rules for layout understanding
             lines = page.lines
             if lines:
@@ -793,7 +803,118 @@ class TextPDFProcessor:
             ))
         
         return elements
-    
+
+    def _extract_raw_text_exact(self, page) -> str:
+        """
+        Extract exact raw text from page preserving all spacing and layout.
+
+        Args:
+            page: pdfplumber page object
+
+        Returns:
+            Raw text with exact spacing and formatting preserved
+        """
+        try:
+            # Method 1: Try to get text with layout preservation using extract_text with layout=True
+            try:
+                raw_text = page.extract_text(layout=True, x_tolerance=1, y_tolerance=1)
+                if raw_text and len(raw_text.strip()) > 0:
+                    return raw_text
+            except Exception as e:
+                logger.debug(f"Layout-based extraction failed: {e}")
+
+            # Method 2: Character-by-character reconstruction preserving exact positions
+            chars = page.chars
+            if chars:
+                return self._reconstruct_text_with_exact_spacing(chars)
+
+            # Method 3: Fallback to basic extraction
+            return page.extract_text() or ""
+
+        except Exception as e:
+            logger.warning(f"Raw text extraction failed: {e}")
+            return ""
+
+    def _reconstruct_text_with_exact_spacing(self, chars: List[Dict]) -> str:
+        """
+        Reconstruct text from characters preserving exact spacing and layout.
+
+        Args:
+            chars: List of character dictionaries from pdfplumber
+
+        Returns:
+            Text with exact spacing preserved
+        """
+        if not chars:
+            return ""
+
+        # Sort characters by y-coordinate (top to bottom) then x-coordinate (left to right)
+        sorted_chars = sorted(chars, key=lambda c: (-c.get('y0', 0), c.get('x0', 0)))
+
+        lines = []
+        current_line = []
+        current_y = None
+        y_tolerance = 2  # Tolerance for considering characters on the same line
+
+        for char in sorted_chars:
+            char_y = char.get('y0', 0)
+            char_text = char.get('text', '')
+            char_x = char.get('x0', 0)
+
+            # Check if this character is on a new line
+            if current_y is None or abs(char_y - current_y) > y_tolerance:
+                # Save previous line if it exists
+                if current_line:
+                    lines.append(self._build_line_with_spacing(current_line))
+
+                # Start new line
+                current_line = [(char_x, char_text)]
+                current_y = char_y
+            else:
+                # Add to current line
+                current_line.append((char_x, char_text))
+
+        # Add the last line
+        if current_line:
+            lines.append(self._build_line_with_spacing(current_line))
+
+        return '\n'.join(lines)
+
+    def _build_line_with_spacing(self, char_positions: List[tuple]) -> str:
+        """
+        Build a line of text with proper spacing based on character positions.
+
+        Args:
+            char_positions: List of (x_position, character) tuples
+
+        Returns:
+            Line of text with proper spacing
+        """
+        if not char_positions:
+            return ""
+
+        # Sort by x position
+        char_positions.sort(key=lambda x: x[0])
+
+        line_text = ""
+        prev_x = None
+
+        for x_pos, char_text in char_positions:
+            if prev_x is not None:
+                # Calculate spacing based on position difference
+                # Approximate character width (adjust as needed)
+                char_width = 6  # Average character width in points
+                space_count = max(0, int((x_pos - prev_x) / char_width) - 1)
+
+                # Add spaces if there's a gap
+                if space_count > 0:
+                    line_text += ' ' * space_count
+
+            line_text += char_text
+            prev_x = x_pos + len(char_text) * 6  # Estimate end position
+
+        return line_text
+
     def _process_tables(self, tables: List[List[List[str]]]) -> List[Dict[str, Any]]:
         """
         Process extracted tables into structured format.
